@@ -1,0 +1,10 @@
+body{
+	margin:0;
+}
+#palyer{
+	height: 800px;
+	margin:0 auto;
+	padding: 10px;
+	background: #607D8B;
+	box-shadow: 0 0 5px rgba(0, 0, 0, 0.2);
+}
