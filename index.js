@@ -24,8 +24,6 @@ function init(){
   });
 }
 
-
-
 var API = {
   '/search': function(req,res){
 
@@ -56,41 +54,49 @@ function service (req, res){
 }
 
 var playerOptions = _.extend({
-  volume: 50,
-  time:0,
-  totalTime:0,
-  songs:null,
-  songsList:[],
+  ops:{
+    volume: 50,
+    time:0,
+    totalTime:0,
+    songs:null,
+    songsList:[],
+  },
   setVolume: function(percent,socket){
     percent = parseInt(percent);
     if(isNaN(percent)) return;
-    if(this.volume != percent){
-      this.volume = percent;
+    if(this.ops.volume != percent){
+      this.ops.volume = percent;
       this.emit('volumeChange',socket);
     }
   },
   setTime:function(time){
-    time = parseInt(time);
+    time = parseFloat(time);
     if(isNaN(time)) return;
-    if(this.time != time){
-      this.time = time;
-      this.emit('timeChange');
+    if(this.ops.time != time){
+      this.ops.time = time;
+      this.emit('timeChange',this.time);
     }
   },
   setTotalTime: function(time){
-    time = parseInt(time);
+    time = parseFloat(time);
     if(isNaN(time)) return;
-    if(this.totalTime != time){
-      this.totalTime = time;
-      this.emit('totalTimeChange');
+    if(this.ops.totalTime != time){
+      this.ops.totalTime = time;
+      this.emit('totalTimeChange',this.totalTime);
     }
   },
   setSongs: function(songs){
-    this.songs = songs;
+    this.ops.songs = songs;
     this.emit('songsChange');
   },
   addSongsList: function(songs){
-    this.songsList = this.songsList.concat(songs);
+    this.ops.songsList = this.ops.songsList.concat(songs);
+    this.emit('songsListChange');
+    this._writeSongsList();
+  },
+  delSongsList: function(songs){
+    var index = this.getSongsIndex(songs);
+    this.ops.songsList.splice(index,1);
     this.emit('songsListChange');
     this._writeSongsList();
   },
@@ -98,7 +104,7 @@ var playerOptions = _.extend({
     if(!fs.existsSync('cache')){
       fs.mkdirSync('cache');
     }
-    fs.writeFileSync("cache/playlist.json",JSON.stringify(this.songsList));
+    fs.writeFileSync("cache/playlist.json",JSON.stringify(this.ops.songsList));
   },
   _readSongsList: function(){
     if(!fs.existsSync('cache')){
@@ -111,18 +117,21 @@ var playerOptions = _.extend({
     }
   },
   getSongsIndex: function(item){
-    return this.songsList.indexOf(item || this.songs);
+    if(!item) return 0;
+    return this.ops.songsList.findIndex(function(it){
+      return it.id == item.id;
+    });
   },
   prevSongs: function(){
-    var songsList = this.songsList;
-    var index = this.getSongsIndex(this.songs);
+    var songsList = this.ops.songsList;
+    var index = this.getSongsIndex(this.ops.songs);
     index -= 1;
     index = index < 0 ? songsList.length-1 : index;
     return songsList[index];
   },
   nextSongs: function(){
-    var songsList = this.songsList;
-    var index = this.getSongsIndex(this.songs);
+    var songsList = this.ops.songsList;
+    var index = this.getSongsIndex(this.ops.songs);
     index += 1;
     index = index > songsList.length-1 ? 0 : index;
     return songsList[index];
@@ -135,9 +144,11 @@ var playerOptions = _.extend({
 function initSocket(){
   io.on('connection', function (socket) {
     socket.emit('login');
-    socket.emit('volume',playerOptions.volume);
-    if(playerOptions.songs){
-      io.emit('init',playerOptions);
+    socket.emit('volume',playerOptions.ops.volume);
+    if(playerOptions.ops.songs){
+      io.emit('init',_.extend({
+        serverTime:new Date().getTime(),
+      },playerOptions.ops,mplayer.status));
     }
     socket.on('reqSongsSuggest',function(keyword){
       songs.getSongs(keyword).then(function(res){
@@ -149,9 +160,12 @@ function initSocket(){
     });
     socket.on('addSongs',function(item){
       playerOptions.addSongsList(item);
-      if(!playerOptions.songs){
-        playSongs(playerOptions.songsList[0]);
+      if(!playerOptions.ops.songs){
+        playSongs(playerOptions.ops.songsList[0]);
       }
+    });
+    socket.on('delSongs',function(item){
+      playerOptions.delSongsList(item);
     });
     socket.on('nextSongs',function(){
       playSongs(playerOptions.nextSongs());
@@ -161,7 +175,7 @@ function initSocket(){
     });
     socket.on('volume',function(percent){
       playerOptions.setVolume(percent,socket);
-      mplayer.volume(playerOptions.volume);
+      mplayer.volume(playerOptions.ops.volume);
     });
     socket.on('songsPause',function(){
       mplayer.pause();
@@ -171,21 +185,30 @@ function initSocket(){
     });
     socket.on('seek',function(min){
       mplayer.seek(min);
-      mplayer.volume(playerOptions.volume);
+      mplayer.volume(playerOptions.ops.volume);
     });
     socket.on('seekPercent',function(percent){
       mplayer.seekPercent(percent);
-      mplayer.volume(playerOptions.volume);
+      mplayer.volume(playerOptions.ops.volume);
     });
   });
 
+  mplayer.on('play',function(){
+    io.emit('songsPlay',_.extend({
+      serverTime:new Date().getTime(),
+    },playerOptions.ops,this.status));
+  });
+  mplayer.on('pause',function(){
+    io.emit('songsPause',_.extend({
+      serverTime:new Date().getTime(),
+    },playerOptions.ops,this.status));
+  });
   mplayer.on('start',function(){
-    this.volume(playerOptions.volume);
-    io.emit('startPlay',{
-      time:0,
-      totalTime:0,
-      index:playerOptions.getSongsIndex(),
-      songs:playerOptions.songs
+    this.volume(playerOptions.ops.volume);
+    playerOptions.once('totalTimeChange',function(){
+      io.emit('startPlay',_.extend({
+        serverTime:new Date().getTime(),
+      },playerOptions.ops,mplayer.status));
     });
   });
   mplayer.on('sstop',function(code){
@@ -200,7 +223,6 @@ function initSocket(){
       times = data.match(/A\:\s+(\d+\.\d+).*?of\s(\d+\.\d+)/);
       playerOptions.setTime(times[1]);
       playerOptions.setTotalTime(times[2]);
-      io.emit('timechange',[playerOptions.time,playerOptions.totalTime]);
     }
     if(data.indexOf('EOF code:') != -1){
       var code = data.match(/EOF\scode\:\s(\d+)/);
@@ -211,14 +233,14 @@ function initSocket(){
   });
 
   playerOptions.on('volumeChange',function(socket){
-    socket.broadcast.emit('volume',playerOptions.volume);
+    socket.broadcast.emit('volume',playerOptions.ops.volume);
   });
   playerOptions.on('songsListChange',function(){
-    io.emit('menuChange',playerOptions.songsList);
+    io.emit('menuChange',playerOptions.ops.songsList);
   });
 
-  if(playerOptions.songsList.length>0){
-    playSongs(playerOptions.songsList[0]);
+  if(playerOptions.ops.songsList.length>0){
+    playSongs(playerOptions.ops.songsList[0]);
   }
 
   function playSongs(item){
