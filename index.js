@@ -8,12 +8,15 @@ var parseArgs = require('minimist');
 var http = require('http');
 var io = require('socket.io');
 var songs = require('./lib/songs');
+var EventEmitter = require('events').EventEmitter.prototype;
 
 var app,io,mplayer;
 function init(){
   process.env.PATH+=';'+path.resolve('mplayer');
   app = http.createServer(service);
   io = io(app);
+  
+  playerOptions.init();
   mplayer = new Mplayer();
 
   app.listen(parseArgs.p || 8888, function(){
@@ -21,7 +24,6 @@ function init(){
   });
 }
 
-init();
 
 
 var API = {
@@ -53,69 +55,191 @@ function service (req, res){
   });
 }
 
-var playerOptions = {
-  volume: 40,
+var playerOptions = _.extend({
+  volume: 50,
   time:0,
-  totalTime:0
-}
+  totalTime:0,
+  songs:null,
+  songsList:[],
+  setVolume: function(percent,socket){
+    percent = parseInt(percent);
+    if(isNaN(percent)) return;
+    if(this.volume != percent){
+      this.volume = percent;
+      this.emit('volumeChange',socket);
+    }
+  },
+  setTime:function(time){
+    time = parseInt(time);
+    if(isNaN(time)) return;
+    if(this.time != time){
+      this.time = time;
+      this.emit('timeChange');
+    }
+  },
+  setTotalTime: function(time){
+    time = parseInt(time);
+    if(isNaN(time)) return;
+    if(this.totalTime != time){
+      this.totalTime = time;
+      this.emit('totalTimeChange');
+    }
+  },
+  setSongs: function(songs){
+    this.songs = songs;
+    this.emit('songsChange');
+  },
+  addSongsList: function(songs){
+    this.songsList = this.songsList.concat(songs);
+    this.emit('songsListChange');
+    this._writeSongsList();
+  },
+  _writeSongsList: function(){
+    if(!fs.existsSync('cache')){
+      fs.mkdirSync('cache');
+    }
+    fs.writeFileSync("cache/playlist.json",JSON.stringify(this.songsList));
+  },
+  _readSongsList: function(){
+    if(!fs.existsSync('cache')){
+      fs.mkdirSync('cache');
+    }
+    if(!fs.existsSync('cache/playlist.json')){
+      return [];
+    }else{
+      return JSON.parse(fs.readFileSync('cache/playlist.json'));
+    }
+  },
+  getSongsIndex: function(item){
+    return this.songsList.indexOf(item || this.songs);
+  },
+  prevSongs: function(){
+    var songsList = this.songsList;
+    var index = this.getSongsIndex(this.songs);
+    index -= 1;
+    index = index < 0 ? songsList.length-1 : index;
+    return songsList[index];
+  },
+  nextSongs: function(){
+    var songsList = this.songsList;
+    var index = this.getSongsIndex(this.songs);
+    index += 1;
+    index = index > songsList.length-1 ? 0 : index;
+    return songsList[index];
+  },
+  init: function(){
+    this.addSongsList(this._readSongsList());
+  }
+},EventEmitter);
 
-io.on('connection', function (socket) {
-  socket.emit('login');
-  socket.on('reqSongsSuggest',function(keyword){
-    songs.getSongs(keyword).then(function(res){
-      socket.emit('resSongsSuggest',res);
+function initSocket(){
+  io.on('connection', function (socket) {
+    socket.emit('login');
+    socket.emit('volume',playerOptions.volume);
+    if(playerOptions.songs){
+      io.emit('init',playerOptions);
+    }
+    socket.on('reqSongsSuggest',function(keyword){
+      songs.getSongs(keyword).then(function(res){
+        socket.emit('resSongsSuggest',res);
+      });
+    });
+    socket.on('playSongs',function(item){
+      playSongs(item);
+    });
+    socket.on('addSongs',function(item){
+      playerOptions.addSongsList(item);
+      if(!playerOptions.songs){
+        playSongs(playerOptions.songsList[0]);
+      }
+    });
+    socket.on('nextSongs',function(){
+      playSongs(playerOptions.nextSongs());
+    });
+    socket.on('prevSongs',function(){
+      playSongs(playerOptions.prevSongs());
+    });
+    socket.on('volume',function(percent){
+      playerOptions.setVolume(percent,socket);
+      mplayer.volume(playerOptions.volume);
+    });
+    socket.on('songsPause',function(){
+      mplayer.pause();
+    });
+    socket.on('songsPlay',function(){
+      mplayer.play();
+    });
+    socket.on('seek',function(min){
+      mplayer.seek(min);
+      mplayer.volume(playerOptions.volume);
+    });
+    socket.on('seekPercent',function(percent){
+      mplayer.seekPercent(percent);
+      mplayer.volume(playerOptions.volume);
     });
   });
-  socket.on('playSongs',function(id){
-    songs.getSongsUrl(id).then(function(res){
-      var url = res.data[0].url;
-      console.log('play: '+url);
-      playerOptions.time = 0;
-      playerOptions.totalTime = 0;
-      mplayer.stop();
-      setTimeout(function(){
-        mplayer.openFile(url);
-      },500);
-      //mplayer.volume(60);
-    });
-  });
+
   mplayer.on('start',function(){
     this.volume(playerOptions.volume);
-    socket.emit('startPlay',[playerOptions.time,playerOptions.totalTime])
+    io.emit('startPlay',{
+      time:0,
+      totalTime:0,
+      index:playerOptions.getSongsIndex(),
+      songs:playerOptions.songs
+    });
+  });
+  mplayer.on('sstop',function(code){
+    //自动播放完成
+    if(code == 1){
+      playSongs(playerOptions.nextSongs());
+    }
   });
   mplayer.player.instance.stdout.on('data',function(data){
     data = data.toString();
     if(data.indexOf('A:') === 0) {
       times = data.match(/A\:\s+(\d+\.\d+).*?of\s(\d+\.\d+)/);
-      playerOptions.time = parseInt(times[1]);
-      playerOptions.totalTime = parseInt(times[2]);
-      socket.broadcast.emit('timechange',[playerOptions.time,playerOptions.totalTime]);
+      playerOptions.setTime(times[1]);
+      playerOptions.setTotalTime(times[2]);
+      io.emit('timechange',[playerOptions.time,playerOptions.totalTime]);
+    }
+    if(data.indexOf('EOF code:') != -1){
+      var code = data.match(/EOF\scode\:\s(\d+)/);
+      code = code && code[1];
+      code = parseInt(code) || 1;
+      mplayer.emit('sstop',code);
     }
   });
-  mplayer.player.getStatus();
-  socket.on('volume',function(percent){
-    playerOptions.volume = percent;
-    mplayer.volume(playerOptions.volume);
+
+  playerOptions.on('volumeChange',function(socket){
     socket.broadcast.emit('volume',playerOptions.volume);
   });
-  socket.on('pause',function(){
-    mplayer.pause();
+  playerOptions.on('songsListChange',function(){
+    io.emit('menuChange',playerOptions.songsList);
   });
-  socket.on('play',function(){
-    mplayer.play();
-  });
-  socket.on('seek',function(min){
-    mplayer.seek(min);
-    mplayer.volume(playerOptions.volume);
-  });
-  socket.on('seekPercent',function(percent){
-    mplayer.seekPercent(percent);
-    mplayer.volume(playerOptions.volume);
-  });
-  console.log(socket.id);
-  socket._id = socket.id.substring(2)
-});
 
+  if(playerOptions.songsList.length>0){
+    playSongs(playerOptions.songsList[0]);
+  }
+
+  function playSongs(item){
+    if(!item) return;
+    songs.getSongsUrl(item.id).then(function(res){
+      playerOptions.setTime(0);
+      playerOptions.setTotalTime(0);
+      playerOptions.setSongs(item);
+      var url = res.data[0].url;
+      //console.log(url);
+      mplayer.stop();
+      setTimeout(function(){
+        mplayer.openFile(url);
+      },500);
+    });
+  }
+
+}
+
+init();
+initSocket();
 
 
 /*
