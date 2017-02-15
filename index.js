@@ -54,7 +54,11 @@ function service (req, res){
 }
 
 var playerOptions = _.extend({
-  ops:{
+  status: {
+    time: 0,
+    playing: false,
+  },
+  ops: {
     songs:null,
     lyric:null,
     songsList:[],
@@ -124,9 +128,12 @@ function initSocket(){
     socket.emit('login');
     socket.emit('volume',mplayer.status.volume);
     if(mplayer.status.playing){
-      socket.emit('init',_.extend({
-        serverTime:new Date().getTime(),
-      },playerOptions.ops,mplayer.status));
+      mplayer.getTime().then(function(time){
+        io.emit('init',_.extend({},playerOptions.ops,mplayer.status,{
+          serverTime: new Date().getTime(),
+          time: time
+        }));
+      });
     }
     socket.on('reqSongsSuggest',function(keyword){
       songs.getSongs(keyword).then(function(res){
@@ -180,19 +187,21 @@ function initSocket(){
   _.extend(mplayer,{
     getTime: function(){
       var that = this;
-      this.player.cmd('get_time_pos');
+      this.player.cmd('pausing_keep_force get_time_pos');
       return new Promise(function(resolve,reject){
         that.player.once('timechange',function(time){
+          playerOptions.status.time = time;
           resolve(parseFloat(time));
         });
       });
     },
     getPaused: function(){
       var that = this;
-      this.player.cmd('get_property pause');
+      this.player.cmd('pausing_keep_force get_property pause');
       return new Promise(function(resolve,reject){
-        that.player.once('timechange',function(time){
-          resolve(parseFloat(time));
+        that.player.once('paused',function(paused){
+          playerOptions.status.playing = !paused;
+          resolve(parseFloat(paused));
         });
       });
     },
@@ -202,7 +211,7 @@ function initSocket(){
       this.setOptions(options);
       setTimeout(function(){
         that.player.cmd('loadfile', ['"' + file + '"']);
-        that.status.playing = true;
+        playerOptions.status.playing = true;
       },100);
     }
   });
@@ -242,21 +251,13 @@ function initSocket(){
 
   //发送心跳包
   setInterval(function(){
-    /*mplayer.getTime().then(function(time){
+    mplayer.getTime().then(function(time){
       io.emit('timeChange',_.extend({},mplayer.status,{
         serverTime: new Date().getTime(),
         time: time
       }));
-    });*/
-
-    mplayer.getPaused().then(function(){
-
-    })
+    });
   },3000);
-
-  setTimeout(function(){
-    mplayer.player.cmd('pause');
-  },10000);
 
   function playSongs(item){
     if(!item) return;
@@ -275,7 +276,7 @@ function initSocket(){
     data = data.toString();
     if(this.options.debug) {
       if(data.indexOf('A:') !== 0){
-        console.log('stdout: ' + data); 
+        console.log('stdout: ' + data);
       }
     }
 
@@ -332,6 +333,7 @@ function initSocket(){
       this.setStatus({
         duration: parseFloat(data.match(/ANS_LENGTH=([0-9\.]*)/)[1])
       });
+      //this.emit('setlength', parseFloat(data.match(/ANS_LENGTH=([0-9\.]*)/)[1]))
     }
 
     //获取时间
@@ -340,7 +342,7 @@ function initSocket(){
     }
     //获取播放状态
     if(data.indexOf('ANS_pause') !== -1){
-      this.emit('timechange', data.match(/ANS_pause=(\w+)/)[1] == 'yes');
+      this.emit('paused', data.match(/ANS_pause=(\w+)/)[1] == 'yes');
     }
 
   }
