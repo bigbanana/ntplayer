@@ -9,6 +9,27 @@
     console.log('login')
   });
 
+  function PlayStatus(){
+    var status = {
+      time: 0
+    }
+    _.extend(this,{
+      setTime: function(time){
+        time = parseInt(time);
+        if(status.time != time){
+          status.time = time;
+          this.trigger('time',status.time);
+        }
+      },
+      getTime: function(time){
+        return status.time;
+      }
+    });
+  }
+  _.extend(PlayStatus.prototype,Backbone.Events);
+
+  var playStatus = new PlayStatus();
+
   /* controls */
   +(function(){
     var serverTime,$seekAnimate;
@@ -29,9 +50,10 @@
     socket.on('songsPause',stopSeek);
     socket.on('songsPlay',startSeek);
     socket.on('volume',function(percent){
-      console.log(percent)
       $volume.slider("value", percent )
     });
+    socket.on('timeChange',timeChange);
+
 
     $volume.slider({
       range: "min",
@@ -59,29 +81,36 @@
     });
 
     function setCurrent(data){
+      console.log(data);
       $background.attr('src', data.songs.al.picUrl);
       $name.text(data.songs.name+' - '+data.songs.ar[0].name);
       startSeek(data);
+      timeChange(data);
     }
 
     function startSeek(data){
       $pause.toggle(data.playing);
       $play.toggle(!data.playing);
-      serverTime = data.serverTime;
-      var duration = (data.totalTime-data.time)*1000;
-      $seekAnimate.stop(true);
-      $seekAnimate[0].current = data.time;
-      $seekAnimate.animate({current:data.totalTime},{
-        duration: duration,
-        step: function(current){
-          $seek.find('.ui-slider-range').css("width",current*100/data.totalTime+'%');
-        }
-      });
     }
     function stopSeek(data){
       $pause.toggle(data.playing);
       $play.toggle(!data.playing);
       $seekAnimate.stop(true);
+    }
+
+    function timeChange(data){
+      serverTime = data.serverTime;
+      var duration = (data.duration-data.time)*1000;
+      $seekAnimate.stop(true);
+      $seekAnimate[0].current = data.time;
+      $seekAnimate.animate({current:data.duration},{
+        duration: duration,
+        easing: 'linear',
+        step: function(current,opt){
+          playStatus.setTime(current);
+          $seek.find('.ui-slider-range').css("width",current*100/data.duration+'%');
+        }
+      });
     }
 
   })();
@@ -187,19 +216,99 @@
 
   })();
 
-  console.log('查询歌曲');
-  console.log('reqSongsSuggest \'$keyword\'');
-  console.log('播放歌曲');
-  console.log('playSongs $id');
-  console.log('调节音量');
-  console.log('volume $percent');
-  console.log('暂停');
-  console.log('pause');
-  console.log('播放');
-  console.log('play');
-  console.log('跳转到');
-  console.log('seek $num');
-  console.log('跳转到百分比');
-  console.log('seekPercent $percent');
+  /* songs-lyric */
+  +(function(){
+    var lyrics = {},lyricsKeys = [],lyricsValues = [],lyricsOpt;
+    var $background = $player.find(".background");
+    var $songsLyric = $mainbox.find('.songs-lyric');
+    var $content = $songsLyric.find('.content');
+    var $closePanel = $songsLyric.find('.close-panel');
+    lyricsOpt = {
+      ar: '演唱者',
+      by: '歌词作者',
+      ti: '歌曲'
+    }
+
+    socket.on('init',setLyric);
+    socket.on('startPlay',setLyric);
+    
+    $background.on('click',function(){
+      $songsLyric.css({top:0,opacity:0}).animate({opacity:1},200);
+      $actions.fadeOut(200);
+    });
+    $songsLyric.on('click',function(){
+      $songsLyric.animate({opacity:0},200,function(){
+        $songsLyric.css({top:'-100%'});
+      });
+      $actions.fadeIn(200);
+    });
+
+    playStatus.on('time',function(time){
+      if(lyrics[time]){
+        showLyric(lyrics[time]);
+      }
+    });
+
+    function setLyric(data){
+      if(data.lyric.nolyric){
+        $content.html('暂无歌词');
+      }else{
+        lyrics = {},lyricsKeys = [],lyricsValues = [];
+        _.each(data.lyric.lrc.lyric.split('\n'),function(item){
+          var test;
+          var info = item.match(/^\[(.*?)\](.*)/);
+          if(!info){
+            //console.log('无法解析歌词');
+          }else if(test = info[1].match(/(\d+)\:(\d+)/)){
+            var key = parseInt(test[1])*60+parseInt(test[2]);
+            var value = info[2];
+            if(!info[2]) return;
+
+            lyricsKeys.push(key);
+            lyricsValues.push(value);
+            lyrics[key] = lyricsValues.length-1;
+          }else if(test = info[1].match(/(\w+)\:(.*)/)){
+            var pre = lyricsOpt[test[1]];
+            pre = pre ? pre + ' : ' : '';
+            var key = 0;
+            var value = pre + test[2];
+
+            lyricsKeys.push(key);
+            lyricsValues.push(value);
+            lyrics[key] = lyricsValues.length-1;
+          }else{
+            console.log('无法解析歌词');
+          }
+        })
+        $content.html(lyricTemp({lyrics:lyricsValues}));
+      }
+      var index = _.sortedIndex(lyricsKeys,playStatus.getTime())-1;
+      index = index<0 ? 0 : index;
+      showLyric(index);
+    }
+
+    function showLyric(num){
+      var offset,duration;
+      duration = 0.2
+      if(num>6){
+        offset = (num-6)*24;
+      }else{
+        offset = 0;
+      }
+
+      $content.stop(true).animate({scrollTop:offset},duration*1000);
+      $content.children().eq(num).addClass('current')
+        .siblings().removeClass('current');
+    }
+
+    var lyricTemp = _.template([
+      '<% _.each(lyrics,function(item){ %>',
+        '<div class="item">',
+          '<div class="text"><%= item.replace(/\\[.*?\\]/g,"") %></div>',
+        '</div>',
+      '<% }) %>'
+    ].join(''));
+
+  })();
 
 })();
