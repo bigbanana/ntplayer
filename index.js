@@ -17,7 +17,7 @@ function init(){
   io = io(app);
   
   playerOptions.init();
-  mplayer = new Mplayer();
+  mplayer = new Mplayer({debug:true});
 
   app.listen(parseArgs.p || 8888, function(){
     console.log('http://localhost:'+app.address().port);
@@ -55,26 +55,9 @@ function service (req, res){
 
 var playerOptions = _.extend({
   ops:{
-    time:0,
     songs:null,
     lyric:null,
     songsList:[],
-  },
-  setTime:function(time){
-    time = parseFloat(time);
-    if(isNaN(time)) return;
-    if(this.ops.time != time){
-      this.ops.time = time;
-      this.emit('timeChange',this.time);
-    }
-  },
-  setTotalTime: function(time){
-    time = parseFloat(time);
-    if(isNaN(time)) return;
-    if(this.ops.totalTime != time){
-      this.ops.totalTime = time;
-      this.emit('totalTimeChange',this.totalTime);
-    }
   },
   setSongs: function(songs){
     this.ops.songs = songs;
@@ -174,9 +157,15 @@ function initSocket(){
     });
     socket.on('songsPause',function(){
       mplayer.pause();
+      io.emit('songsPause',_.extend({
+        serverTime:new Date().getTime(),
+      },playerOptions.ops,this.status));
     });
     socket.on('songsPlay',function(){
       mplayer.play();
+      io.emit('songsPlay',_.extend({
+        serverTime:new Date().getTime(),
+      },playerOptions.ops,this.status));
     });
     socket.on('seek',function(min){
       mplayer.seek(min);
@@ -188,38 +177,46 @@ function initSocket(){
     });
   });
 
-  mplayer.openFile = function(file,options){
-    var that = this;
-    this.player.cmd('stop');
-    this.setOptions(options);
-    setTimeout(function(){
-      that.player.cmd('loadfile', ['"' + file + '"']);
-      that.status.playing = true;
-    },100);
-  }
-  mplayer.on('time',function(time){
-    playerOptions.ops.time = parseFloat(time);
-    timeChange();
+  _.extend(mplayer,{
+    getTime: function(){
+      var that = this;
+      this.player.cmd('get_time_pos');
+      return new Promise(function(resolve,reject){
+        that.player.once('timechange',function(time){
+          resolve(parseFloat(time));
+        });
+      });
+    },
+    getPaused: function(){
+      var that = this;
+      this.player.cmd('get_property pause');
+      return new Promise(function(resolve,reject){
+        that.player.once('timechange',function(time){
+          resolve(parseFloat(time));
+        });
+      });
+    },
+    openFile: function(file,options){
+      var that = this;
+      this.player.cmd('stop');
+      this.setOptions(options);
+      setTimeout(function(){
+        that.player.cmd('loadfile', ['"' + file + '"']);
+        that.status.playing = true;
+      },100);
+    }
   });
-  mplayer.on('play',function(){
-    io.emit('songsPlay',_.extend({
-      serverTime:new Date().getTime(),
-    },playerOptions.ops,this.status));
-  });
-  mplayer.on('pause',function(){
-    io.emit('songsPause',_.extend({
-      serverTime:new Date().getTime(),
-    },playerOptions.ops,this.status));
-  });
+
   mplayer.on('start',function(){
     this.volume(this.status.volume);
-    this.once('status',function(){
-      io.emit('startPlay',_.extend({
-        serverTime:new Date().getTime(),
-      },playerOptions.ops,this.status));
+    this.getTime().then(function(time){
+      io.emit('startPlay',_.extend({},playerOptions.ops,mplayer.status,{
+        serverTime: new Date().getTime(),
+        time: time
+      }));
     });
-    
   });
+
   mplayer.player.on('playstop',function(code){
     //自动播放完成
     if(code == 1){
@@ -238,9 +235,28 @@ function initSocket(){
     cache: 128,
     cacheMin: 1
   });
+
   if(playerOptions.ops.songsList.length>0){
     playSongs(playerOptions.ops.songsList[0]);
   }
+
+  //发送心跳包
+  setInterval(function(){
+    /*mplayer.getTime().then(function(time){
+      io.emit('timeChange',_.extend({},mplayer.status,{
+        serverTime: new Date().getTime(),
+        time: time
+      }));
+    });*/
+
+    mplayer.getPaused().then(function(){
+
+    })
+  },3000);
+
+  setTimeout(function(){
+    mplayer.player.cmd('pause');
+  },10000);
 
   function playSongs(item){
     if(!item) return;
@@ -257,7 +273,6 @@ function initSocket(){
 
   function onData(data){
     data = data.toString();
-
     if(this.options.debug) {
       if(data.indexOf('A:') !== 0){
         console.log('stdout: ' + data); 
@@ -319,14 +334,16 @@ function initSocket(){
       });
     }
 
-  }
+    //获取时间
+    if(data.indexOf('ANS_TIME_POSITION') !== -1){
+      this.emit('timechange', parseFloat(data.match(/ANS_TIME_POSITION=([0-9\.]*)/)[1]));
+    }
+    //获取播放状态
+    if(data.indexOf('ANS_pause') !== -1){
+      this.emit('timechange', data.match(/ANS_pause=(\w+)/)[1] == 'yes');
+    }
 
-  timeChange = _.throttle(function(){
-    io.emit('timeChange',_.extend({
-      serverTime: new Date().getTime(),
-      time: playerOptions.ops.time
-    },mplayer.status));
-  },10000,{leading:true});
+  }
 
 }
 
